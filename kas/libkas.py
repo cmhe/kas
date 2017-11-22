@@ -306,7 +306,11 @@ def get_build_environ(config, build_dir):
         except ValueError:
             pass
 
-    env_vars = ['SSTATE_DIR', 'DL_DIR', 'TMPDIR']
+    conf_env = config.get_environment()
+
+    env_vars = ['SSTATE_DIR', 'DL_DIR', 'TMPDIR'] + list(conf_env.keys())
+    env.update(conf_env)
+
     if 'BB_ENV_EXTRAWHITE' in env:
         extra_white = env['BB_ENV_EXTRAWHITE'] + ' '.join(env_vars)
         env.update({'BB_ENV_EXTRAWHITE': extra_white})
