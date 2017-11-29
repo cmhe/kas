@@ -154,7 +154,7 @@ def find_program(paths, name):
 
 
 @asyncio.coroutine
-def _repo_fetch_async(config, repo):
+def _repo_fetch_async(context, repo):
     """
         Start asynchronous repository fetch.
     """
@@ -163,16 +163,16 @@ def _repo_fetch_async(config, repo):
 
     if not os.path.exists(repo.path):
         os.makedirs(os.path.dirname(repo.path), exist_ok=True)
-        gitsrcdir = os.path.join(config.get_repo_ref_dir() or '',
+        gitsrcdir = os.path.join(context.get_repo_ref_dir() or '',
                                  repo.qualified_name)
         logging.debug('Looking for repo ref dir in %s', gitsrcdir)
 
         cmd = ['git', 'clone', '-q', repo.url, repo.path]
-        if config.get_repo_ref_dir() and os.path.exists(gitsrcdir):
+        if context.get_repo_ref_dir() and os.path.exists(gitsrcdir):
             cmd.extend(['--reference', gitsrcdir])
         (retc, _) = yield from run_cmd_async(cmd,
-                                             env=config.environ,
-                                             cwd=config.kas_work_dir)
+                                             env=context.get_environment(),
+                                             cwd=context.kas_work_dir)
         if retc == 0:
             logging.info('Repository %s cloned', repo.name)
         return retc
@@ -181,7 +181,7 @@ def _repo_fetch_async(config, repo):
     (retc, output) = yield from run_cmd_async(['git',
                                                'cat-file', '-t',
                                                repo.refspec],
-                                              env=config.environ,
+                                              env=context.get_environment(),
                                               cwd=repo.path,
                                               fail=False,
                                               liveupdate=False)
@@ -193,7 +193,7 @@ def _repo_fetch_async(config, repo):
     # No it is missing, try to fetch
     (retc, output) = yield from run_cmd_async(['git',
                                                'fetch', '--all'],
-                                              env=config.environ,
+                                              env=context.get_environment(),
                                               cwd=repo.path,
                                               fail=False)
     if retc:
@@ -204,7 +204,7 @@ def _repo_fetch_async(config, repo):
     return 0
 
 
-def repos_fetch(config, repos):
+def repos_fetch(context, repos):
     """
         Fetches the list of repositories to the kas_work_dir.
     """
@@ -212,9 +212,9 @@ def repos_fetch(config, repos):
     for repo in repos:
         if not hasattr(asyncio, 'ensure_future'):
             # pylint: disable=no-member,deprecated-method
-            task = asyncio.async(_repo_fetch_async(config, repo))
+            task = asyncio.async(_repo_fetch_async(context, repo))
         else:
-            task = asyncio.ensure_future(_repo_fetch_async(config, repo))
+            task = asyncio.ensure_future(_repo_fetch_async(context, repo))
         tasks.append(task)
 
     loop = asyncio.get_event_loop()
@@ -225,7 +225,7 @@ def repos_fetch(config, repos):
             sys.exit(task.result())
 
 
-def repo_checkout(config, repo):
+def repo_checkout(context, repo):
     """
         Checks out the correct revision of the repo.
     """
@@ -234,7 +234,7 @@ def repo_checkout(config, repo):
 
     # Check if repos is dirty
     (_, output) = run_cmd(['git', 'diff', '--shortstat'],
-                          env=config.environ, cwd=repo.path,
+                          env=context.get_environment(), cwd=repo.path,
                           fail=False)
     if output:
         logging.warning('Repo %s is dirty. no checkout', repo.name)
@@ -243,7 +243,7 @@ def repo_checkout(config, repo):
     # Check if current HEAD is what in the config file is defined.
     (_, output) = run_cmd(['git', 'rev-parse',
                            '--verify', 'HEAD'],
-                          env=config.environ, cwd=repo.path)
+                          env=context.get_environment(), cwd=repo.path)
 
     if output.strip() == repo.refspec:
         logging.info('Repo %s has already checkout out correct '
@@ -255,7 +255,7 @@ def repo_checkout(config, repo):
             cwd=repo.path)
 
 
-def get_build_environ(config, build_dir):
+def get_build_environ(context, build_dir):
     """
         Create the build environment variables.
     """
@@ -265,7 +265,7 @@ def get_build_environ(config, build_dir):
 
     init_repo = None
     permutations = \
-        [(repo, script) for repo in config.get_repos()
+        [(repo, script) for repo in context.get_repos()
          for script in ['oe-init-build-env', 'isar-init-build-env']]
     for (repo, script) in permutations:
         if os.path.exists(repo.path + '/' + script):
@@ -306,24 +306,11 @@ def get_build_environ(config, build_dir):
         except ValueError:
             pass
 
-    conf_env = config.get_environment()
-
-    env_vars = ['SSTATE_DIR', 'DL_DIR', 'TMPDIR']
-    env_vars.extend(conf_env)
-
-    env.update(conf_env)
+    env_vars = context.get_environment_configured_varname_list()
 
     if 'BB_ENV_EXTRAWHITE' in env:
         extra_white = env['BB_ENV_EXTRAWHITE'] + ' '.join(env_vars)
         env.update({'BB_ENV_EXTRAWHITE': extra_white})
-
-    env_vars.extend(['SSH_AGENT_PID', 'SSH_AUTH_SOCK',
-                     'SHELL', 'TERM',
-                     'GIT_PROXY_COMMAND', 'NO_PROXY'])
-
-    for env_var in env_vars:
-        if env_var in os.environ:
-            env[env_var] = os.environ[env_var]
 
     return env
 
@@ -339,12 +326,12 @@ def ssh_add_key(env, key):
         logging.error('failed to add ssh key: %s', error)
 
 
-def ssh_cleanup_agent(config):
+def ssh_cleanup_agent(context):
     """
         Removes the identities and stop the ssh-agent instance
     """
     # remove the identities
-    process = Popen(['ssh-add', '-D'], env=config.environ)
+    process = Popen(['ssh-add', '-D'], env=context.get_environment())
     process.wait()
     if process.returncode != 0:
         logging.error('failed to delete SSH identities')

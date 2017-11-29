@@ -24,7 +24,7 @@
 """
 
 import os
-from .config import Config
+from .config import create_context
 from .libkas import find_program, run_cmd, kasplugin
 from .libcmds import (Macro, Command, SetupDir, SetupProxy,
                       CleanupSSHAgent, SetupSSHAgent, SetupEnviron,
@@ -72,13 +72,12 @@ class Build:
         if args.cmd != 'build':
             return False
 
-        cfg = Config(args.config, args.target, args.task)
+        cfg = create_context(args.config, target=args.target, task=args.task)
 
         macro = Macro()
 
         # Prepare
         macro.add(SetupDir())
-        macro.add(SetupProxy())
 
         if 'SSH_PRIVATE_KEY' in os.environ:
             macro.add(SetupSSHAgent())
@@ -113,12 +112,12 @@ class BuildCommand(Command):
     def __str__(self):
         return 'build'
 
-    def execute(self, config):
+    def execute(self, context):
         """
             Executes the bitbake build command.
         """
         # Start bitbake build of image
-        bitbake = find_program(config.environ['PATH'], 'bitbake')
-        run_cmd([bitbake, '-k', '-c', config.get_bitbake_task()] +
-                config.get_bitbake_targets(),
-                env=config.environ, cwd=config.build_dir)
+        bitbake = find_program(context.get_environment()['PATH'], 'bitbake')
+        run_cmd([bitbake, '-k', '-c', context.get_bitbake_task()] +
+                context.get_bitbake_targets(),
+                env=context.get_environment(), cwd=context.build_dir)

@@ -47,7 +47,7 @@ class Macro:
         """
         self.commands.append(command)
 
-    def run(self, config, skip=None):
+    def run(self, context, skip=None):
         """
             Runs command from the command list respective to the configuration.
         """
@@ -57,7 +57,7 @@ class Macro:
             if command_name in skip:
                 continue
             logging.debug('execute %s', command_name)
-            command.execute(config)
+            command.execute(context)
 
 
 class Command:
@@ -65,7 +65,7 @@ class Command:
         An abstract class that defines the interface of a command.
     """
 
-    def execute(self, config):
+    def execute(self, context):
         """
             This method executes the command.
         """
@@ -87,12 +87,12 @@ class SetupHome(Command):
     def __str__(self):
         return 'setup_home'
 
-    def execute(self, config):
+    def execute(self, context):
         with open(self.tmpdirname + '/.wgetrc', 'w') as fds:
             fds.write('\n')
         with open(self.tmpdirname + '/.netrc', 'w') as fds:
             fds.write('\n')
-        config.environ['HOME'] = self.tmpdirname
+        context.update_environment({'HOME': self.tmpdirname})
 
 
 class SetupDir(Command):
@@ -103,10 +103,10 @@ class SetupDir(Command):
     def __str__(self):
         return 'setup_dir'
 
-    def execute(self, config):
-        os.chdir(config.kas_work_dir)
-        if not os.path.exists(config.build_dir):
-            os.mkdir(config.build_dir)
+    def execute(self, context):
+        os.chdir(context.kas_work_dir)
+        if not os.path.exists(context.build_dir):
+            os.mkdir(context.build_dir)
 
 
 class SetupSSHAgent(Command):
@@ -117,9 +117,9 @@ class SetupSSHAgent(Command):
     def __str__(self):
         return 'setup_ssh_agent'
 
-    def execute(self, config):
-        ssh_setup_agent(config)
-        ssh_no_host_key_check(config)
+    def execute(self, context):
+        ssh_setup_agent(context)
+        ssh_no_host_key_check(context)
 
 
 class CleanupSSHAgent(Command):
@@ -130,20 +130,8 @@ class CleanupSSHAgent(Command):
     def __str__(self):
         return 'cleanup_ssh_agent'
 
-    def execute(self, config):
-        ssh_cleanup_agent(config)
-
-
-class SetupProxy(Command):
-    """
-        Setups proxy configuration in the kas environment.
-    """
-
-    def __str__(self):
-        return 'setup_proxy'
-
-    def execute(self, config):
-        config.environ.update(config.get_proxy_config())
+    def execute(self, context):
+        ssh_cleanup_agent(context)
 
 
 class SetupEnviron(Command):
@@ -154,8 +142,9 @@ class SetupEnviron(Command):
     def __str__(self):
         return 'setup_environ'
 
-    def execute(self, config):
-        config.environ.update(get_build_environ(config, config.build_dir))
+    def execute(self, context):
+        context.set_build_environment(get_build_environ(context,
+                                                        context.build_dir))
 
 
 class WriteConfig(Command):
@@ -166,28 +155,28 @@ class WriteConfig(Command):
     def __str__(self):
         return 'write_config'
 
-    def execute(self, config):
-        def _write_bblayers_conf(config):
-            filename = config.build_dir + '/conf/bblayers.conf'
+    def execute(self, context):
+        def _write_bblayers_conf(context):
+            filename = context.build_dir + '/conf/bblayers.conf'
             with open(filename, 'w') as fds:
-                fds.write(config.get_bblayers_conf_header())
+                fds.write(context.get_bblayers_conf_header())
                 fds.write('BBLAYERS ?= " \\\n    ')
                 fds.write(' \\\n    '.join(
-                    sorted(layer for repo in config.get_repos()
+                    sorted(layer for repo in context.get_repos()
                            for layer in repo.layers)))
                 fds.write('"\n')
 
-        def _write_local_conf(config):
-            filename = config.build_dir + '/conf/local.conf'
+        def _write_local_conf(context):
+            filename = context.build_dir + '/conf/local.conf'
             with open(filename, 'w') as fds:
-                fds.write(config.get_local_conf_header())
-                fds.write('MACHINE ?= "{}"\n'.format(config.get_machine()))
-                fds.write('DISTRO ?= "{}"\n'.format(config.get_distro()))
+                fds.write(context.get_local_conf_header())
+                fds.write('MACHINE ?= "{}"\n'.format(context.get_machine()))
+                fds.write('DISTRO ?= "{}"\n'.format(context.get_distro()))
                 fds.write('BBMULTICONFIG ?= "{}"\n'.format(
-                    config.get_multiconfig()))
+                    context.get_multiconfig()))
 
-        _write_bblayers_conf(config)
-        _write_local_conf(config)
+        _write_bblayers_conf(context)
+        _write_local_conf(context)
 
 
 class ReposFetch(Command):
@@ -198,8 +187,8 @@ class ReposFetch(Command):
     def __str__(self):
         return 'repos_fetch'
 
-    def execute(self, config):
-        repos_fetch(config, config.get_repos())
+    def execute(self, context):
+        repos_fetch(context, context.get_repos())
 
 
 class ReposCheckout(Command):
@@ -210,6 +199,6 @@ class ReposCheckout(Command):
     def __str__(self):
         return 'repos_checkout'
 
-    def execute(self, config):
-        for repo in config.get_repos():
-            repo_checkout(config, repo)
+    def execute(self, context):
+        for repo in context.get_repos():
+            repo_checkout(context, repo)

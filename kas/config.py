@@ -23,8 +23,8 @@
     This module contains the implementation of the kas configuration.
 """
 
-import os
 import logging
+import os
 import pprint
 
 try:
@@ -48,123 +48,246 @@ except ImportError:
         # pylint: disable=deprecated-method
         return platform.dist()[0]
 
+from .libkas import repo_checkout, repos_fetch, run_cmd
 from .repos import Repo
-from .libkas import run_cmd, repos_fetch, repo_checkout
 
 __license__ = 'MIT'
 __copyright__ = 'Copyright (c) Siemens AG, 2017'
 
 
-class Config:
+BB_ENV_EXTRAWHITE_ADDITIONALS = ['SSTATE_DIR', 'DL_DIR', 'TMPDIR']
+
+
+def get_locale_environ():
     """
-        Implements the kas configuration based on config files.
+        Sets the environment variables for process that are
+        started by kas.
     """
-    def __init__(self, filename, target, task=None):
-        from .includehandler import GlobalIncludes, IncludeException
-        self.__kas_work_dir = os.environ.get('KAS_WORK_DIR', os.getcwd())
-        self.environ = {}
-        self._config = {}
-        self.setup_environ()
-        self.filename = os.path.abspath(filename)
-        self.handler = GlobalIncludes(self.filename)
+    distro_base = get_distro_id_base().lower()
 
-        repo_paths = {}
-        missing_repo_names_old = []
-        (self._config, missing_repo_names) = \
-            self.handler.get_config(repos=repo_paths)
+    if distro_base in ['fedora', 'suse', 'opensuse']:
+        return {'LC_ALL': 'en_US.utf8',
+                'LANG': 'en_US.utf8',
+                'LANGUAGE': 'en_US'}
 
-        self.environ.update(self.get_proxy_config())
+    if distro_base in ['debian', 'ubuntu']:
+        return {'LC_ALL': 'en_US.UTF-8',
+                'LANG': 'en_US.UTF-8',
+                'LANGUAGE': 'en_US:en'}
 
-        while missing_repo_names:
-            if missing_repo_names == missing_repo_names_old:
-                raise IncludeException('Could not fetch all repos needed by '
-                                       'includes.')
+    logging.warning('kas: "%s" is not a supported distro. '
+                    'No default locales set.', distro_base)
+    return {}
 
-            logging.debug('Missing repos for complete config:\n%s',
-                          pprint.pformat(missing_repo_names))
 
-            repo_dict = self.get_repo_dict()
-            missing_repos = [repo_dict[repo_name]
-                             for repo_name in missing_repo_names
-                             if repo_name in repo_dict]
+def get_proxy_environ(os_environ):
+    """
+        Extracts the proxy configuration from the os_environment.
+    """
+    return {var_name: os_environ.get[var_name]
+            for var_name in os_environ.keys() &
+            set(['http_proxy',
+                 'https_proxy',
+                 'ftp_proxy',
+                 'no_proxy',
+                 'HTTP_PROXY',
+                 'HTTPS_PROXY',
+                 'FTP_PROXY',
+                 'NO_PROXY'])}
 
-            repos_fetch(self, missing_repos)
 
-            for repo in missing_repos:
-                repo_checkout(self, repo)
+def get_misc_environ(os_environ):
+    """
+        Extracts the miscellaneous environment variables from the
+        os_environment.
+    """
+    return {var_name: os_environ.get[var_name]
+            for var_name in os_environ.keys() &
+            set(['SSH_AGENT_PID',
+                 'SSH_AUTH_SOCK',
+                 'SHELL',
+                 'TERM',
+                 'GIT_PROXY_COMMAND'] +
+                BB_ENV_EXTRAWHITE_ADDITIONALS)}
 
-            repo_paths = {r: repo_dict[r].path for r in repo_dict}
 
-            missing_repo_names_old = missing_repo_names
-            (self._config, missing_repo_names) = \
-                self.handler.get_config(repos=repo_paths)
+def load_configuration_file(context, filepath):
+    """
+        Fills the configuration of the context based on the kas configuration
+        file.
+    """
+    from .includehandler import GlobalIncludes, IncludeException
+    filepath = os.path.abspath(filepath)
+    handler = GlobalIncludes(filepath)
 
-        logging.debug('Configuration from config file:\n%s',
-                      pprint.pformat(self._config))
+    repo_paths = {}
 
-        if target:
-            self._config['target'] = target
-        if task:
-            self._config['task'] = task
+    missing_repo_names_old = []
+    missing_repo_names = []
+
+    while True:
+        (config, missing_repo_names) = \
+            handler.get_config(repos=repo_paths)
+        context.set_config(config)
+
+        # No missing repo detected, config complete:
+        if not missing_repo_names:
+            break
+
+        # Last interation could not change the number of missing repos:
+        if missing_repo_names == missing_repo_names_old:
+            raise IncludeException('Could not fetch all repos needed by '
+                                   'includes.')
+
+        logging.debug('Missing repos for complete config:\n%s',
+                      pprint.pformat(missing_repo_names))
+
+        repo_dict = context.get_repo_dict()
+        missing_repos = [repo_dict[repo_name]
+                         for repo_name in missing_repo_names
+                         if repo_name in repo_dict]
+
+        repos_fetch(context, missing_repos)
+
+        for repo in missing_repos:
+            repo_checkout(context, repo)
+
+        repo_paths = {r: repo_dict[r].path for r in repo_dict}
+
+        missing_repo_names_old = missing_repo_names
+
+    logging.debug('Configuration from config file:\n%s',
+                  pprint.pformat(config))
+
+
+def get_git_base_path(context, dirpath):
+    """
+        Returns the base path of the git repository that contains the specified
+        directory path.
+    """
+    basepath = None
+    (ret, output) = run_cmd(['git',
+                             'rev-parse',
+                             '--show-toplevel'],
+                            cwd=dirpath,
+                            env=context.get_environment(),
+                            fail=False,
+                            liveupdate=False)
+    if ret == 0:
+        basepath = output.strip()
+    return basepath
+
+
+def create_context(filename, os_environ=None, work_dir='', **qwargs):
+    """
+        Create the kas context based on the configuration file.
+        With the additional argments its possible to overwrite specific entries
+        of the configuration file at runtime. Like distro, targets and task.
+    """
+    os_environ = os_environ or os.environ
+    work_dir = work_dir or os_environ.get('KAS_WORK_DIR', os.getcwd())
+
+    environ = get_locale_environ()
+    environ.update(get_proxy_environ(os_environ))
+    environ.update(get_misc_environ(os_environ))
+
+    # Preliminary empty context:
+    context = Context(work_dir=work_dir, os_environ=os_environ,
+                      environ=environ, config_override=qwargs)
+
+    # Find repo path of the configuraton file:
+    dirpath = os.path.dirname(filename)
+    config_repo_path = get_git_base_path(context, dirpath) or dirpath
+    context.set_config_repo_path(config_repo_path)
+
+    load_configuration_file(context, filename)
+
+    return context
+
+
+class Context:
+    """
+        Represents the kas application context.
+    """
+    def __init__(self, config_repo_path=None, work_dir='', os_environ=None,
+                 environ=None, config=None, config_override=None):
+        self._config_repo_path = config_repo_path
+        self._work_dir = work_dir
+        self._os_environ = os_environ or {}
+        self._environ = environ or {}
+        self._build_environ = {}
+        self._override_environ = {}
+
+        self._config_override = config_override or {}
+        self.set_config(config or {})
+
+    def set_config(self, config):
+        """
+            Sets the internal configuration structure of the context.
+        """
+        self._config = config
+        self._config.update(self._config_override)
+
+    def set_config_repo_path(self, config_repo_path):
+        """
+            Sets the repository path of the configuration file.
+        """
+        self._config_repo_path = config_repo_path
+
+    def set_build_environment(self, env):
+        self._build_environ = env
+
+    def update_environment(self, env):
+        self._environ.update(env)
 
     @property
     def build_dir(self):
         """
             The path of the build directory.
         """
-        return os.path.join(self.__kas_work_dir, 'build')
+        return os.path.join(self._work_dir, 'build')
 
     @property
     def kas_work_dir(self):
         """
             The path to the kas work directory.
         """
-        return self.__kas_work_dir
-
-    def setup_environ(self):
-        """
-            Sets the environment variables for process that are
-            started by kas.
-        """
-        distro_base = get_distro_id_base().lower()
-        if distro_base in ['fedora', 'suse', 'opensuse']:
-            self.environ = {'LC_ALL': 'en_US.utf8',
-                            'LANG': 'en_US.utf8',
-                            'LANGUAGE': 'en_US'}
-        elif distro_base in ['debian', 'ubuntu']:
-            self.environ = {'LC_ALL': 'en_US.UTF-8',
-                            'LANG': 'en_US.UTF-8',
-                            'LANGUAGE': 'en_US:en'}
-        else:
-            logging.warning('kas: "%s" is not a supported distro. '
-                            'No default locales set.', distro_base)
-            self.environ = {}
+        return self._work_dir
 
     def get_repo_ref_dir(self):
         """
             The path to the directory that contains the repository references.
         """
-        # pylint: disable=no-self-use
 
-        return os.environ.get('KAS_REPO_REF_DIR', None)
+        return self._os_environ.get('KAS_REPO_REF_DIR', None)
 
-    def get_proxy_config(self):
+    def get_environment(self):
         """
-            Returns the proxy settings
+            Returns the context environment variables from the configuration,
+            with possible overwritten values from the shell environment.
         """
-        proxy_config = self._config.get('proxy_config', {})
-        return {var_name: os.environ.get(var_name,
-                                         proxy_config.get(var_name, ''))
-                for var_name in ['http_proxy',
-                                 'https_proxy',
-                                 'ftp_proxy',
-                                 'no_proxy']}
+        config_env = self._config.get('env', {})
+        config_env = {var: self._os_environ.get(var, config_env[var])
+                      for var in config_env}
+
+        env = self._build_environ.copy()
+        env.update(config_env)
+        env.update(self._environ)
+        return env
+
+    def get_environment_configured_varname_list(self):
+        """
+            Returns the list of environment variables that are configured
+            in the configuration file. For example used to supplement the
+            BB_ENV_EXTRAWHITE.
+        """
+        return list(self._config.get('env', {}).keys()) + \
+            BB_ENV_EXTRAWHITE_ADDITIONALS
 
     def get_repos(self):
         """
             Returns the list of repos.
         """
-        # pylint: disable=no-self-use
 
         return list(self.get_repo_dict().values())
 
@@ -174,6 +297,7 @@ class Config:
             their name (as it is defined in the config file) as key
             and the `Repo` instances as value.
         """
+
         repo_config_dict = self._config.get('repos', {})
         repo_dict = {}
         for repo in repo_config_dict:
@@ -193,19 +317,7 @@ class Config:
             if url is None:
                 # No git operation on repository
                 if path is None:
-                    # In-tree configuration
-                    path = os.path.dirname(self.filename)
-                    (ret, output) = run_cmd(['git',
-                                             'rev-parse',
-                                             '--show-toplevel'],
-                                            cwd=path,
-                                            env=self.environ,
-                                            fail=False,
-                                            liveupdate=False)
-                    if ret == 0:
-                        path = output.strip()
-                    logging.info('Using %s as root for repository %s', path,
-                                 name)
+                    path = self._config_repo_path
 
                 url = path
                 rep = Repo(url=url,
@@ -213,7 +325,7 @@ class Config:
                            layers=layers)
                 rep.disable_git_operations()
             else:
-                path = path or os.path.join(self.kas_work_dir, name)
+                path = path or os.path.join(self._work_dir, name)
                 rep = Repo(url=url,
                            path=path,
                            refspec=refspec,
@@ -276,14 +388,6 @@ class Config:
         """
         return os.environ.get('KAS_DISTRO',
                               self._config.get('distro', 'poky'))
-
-    def get_environment(self):
-        """
-            Returns the configured environment variables from the configuration
-            file, with possible overwritten values from the environment.
-        """
-        env = self._config.get('env', {})
-        return {var: os.environ.get(var, env[var]) for var in env}
 
     def get_multiconfig(self):
         """
